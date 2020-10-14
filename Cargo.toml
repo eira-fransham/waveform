@@ -1,0 +1,21 @@
+[package]
+name = "waveform"
+version = "0.1.0"
+authors = ["Jef <jackefransham@gmail.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+gl = "0.14"
+glutin = "0.25"
+rustfft = "4.0"
+rand = "0.7"
+rodio = "0.12"
+pathfinder_geometry = { git = "https://github.com/servo/pathfinder.git" }
+pathfinder_gl = { git = "https://github.com/servo/pathfinder.git" }
+pathfinder_renderer = { git = "https://github.com/servo/pathfinder.git" }
+pathfinder_resources = { git = "https://github.com/servo/pathfinder.git" }
+pathfinder_color = { git = "https://github.com/servo/pathfinder.git" }
+pathfinder_content = { git = "https://github.com/servo/pathfinder.git" }
+pathfinder_canvas = { git = "https://github.com/servo/pathfinder.git" }
