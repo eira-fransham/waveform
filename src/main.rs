@@ -35,21 +35,23 @@ struct Eq {
     scratch: Vec<Complex32>,
     levels: Vec<Complex32>,
     last_levels: Vec<f32>,
+    highest_levels: Vec<f32>,
     next: VecDeque<Complex32>,
-    factor: f32,
+    buf_len: usize,
     len: usize,
 }
 
 impl Eq {
-    fn new(size: usize) -> Self {
+    fn new(num_levels: usize, buffer_size: usize) -> Self {
         Self {
             fft_planner: FFTplanner::new(false),
-            scratch: Vec::with_capacity(size),
-            levels: vec![Default::default(); size],
-            last_levels: Vec::with_capacity(size / 2),
-            next: VecDeque::with_capacity(size),
-            factor: (size as f32).sqrt().recip(),
-            len: size,
+            scratch: Vec::with_capacity(buffer_size),
+            levels: vec![Default::default(); buffer_size],
+            last_levels: Vec::with_capacity(num_levels),
+            highest_levels: Vec::with_capacity(num_levels),
+            next: VecDeque::with_capacity(buffer_size),
+            buf_len: buffer_size,
+            len: num_levels,
         }
     }
 
@@ -58,42 +60,67 @@ impl Eq {
     }
 
     fn push(&mut self, sample: f32) {
-        let sample = Complex32 {
-            re: sample,// * self.factor,
-            im: 0.,
-        };
+        let sample = Complex32 { re: sample, im: 0. };
 
-        while self.next.len() >= self.len() {
+        while self.next.len() >= self.buf_len {
             self.next.pop_front();
         }
 
         self.next.push_back(sample);
     }
 
-    fn update_level(&mut self, i: usize) -> Option<f32> {
-        const FRACTION: f32 = 0.7;
-        let level = self.levels.get(i)?.norm();
-        match self.last_levels.get_mut(i) {
-            Some(last) => {
-                let diff = level - *last;
+    fn update_level(&mut self, i: usize, dt: f32) -> Option<(f32, f32)> {
+        const FRACTION: f32 = 120.;
+        const HIGHEST_FRACTION: f32 = 1.0;
 
-                let out = *last + diff * FRACTION;
+        let frac = (FRACTION * dt).min(1.);
+        let highest_frac = (HIGHEST_FRACTION * dt).min(1.);
+
+        let actual_index =
+            ((i as f32) / self.len() as f32).powi(2) * (self.levels.len() as f32 / 2.);
+        let (lower, higher) = (actual_index.floor() as usize, actual_index.ceil() as usize);
+        let prop = actual_index - lower as f32;
+        let level =
+            self.levels.get(lower)?.norm() * prop + self.levels.get(higher)?.norm() * (1. - prop);
+        let level = level.abs().log10().powi(4).max(0.).min(100.) / 100.;
+        let last = match self.last_levels.get_mut(i) {
+            Some(last) => {
+                let out = *last * (1. - frac) + level * frac;
 
                 *last = out;
 
-                Some(out)
+                out
             }
             None => {
                 debug_assert_eq!(i, self.last_levels.len());
 
                 self.last_levels.push(level);
 
-                Some(level)
+                level
             }
-        }
+        };
+
+        let highest = match self.highest_levels.get_mut(i) {
+            Some(highest) => {
+                let out = (*highest * (1. - highest_frac)).max(last);
+
+                *highest = out;
+
+                out
+            }
+            None => {
+                debug_assert_eq!(i, self.highest_levels.len());
+
+                self.highest_levels.push(level);
+
+                level
+            }
+        };
+
+        Some((last, highest))
     }
 
-    fn draw(&mut self, rect: RectF) -> Option<Path2D> {
+    fn draw(&mut self, rect: RectF, dt: f32) -> Option<(Path2D, Path2D)> {
         const CURVE_CONTROL_DIST: f32 = 1000.0;
 
         let dist = CURVE_CONTROL_DIST / self.len() as f32;
@@ -101,46 +128,75 @@ impl Eq {
         self.scratch.clear();
         self.scratch.extend(self.next.iter().copied());
 
-        self.fft_planner
-            .plan_fft(self.len())
-            .process(&mut self.scratch, &mut self.levels);
+        let cur_count = self.scratch.len();
 
-        let mut path = Path2D::new();
+        self.fft_planner
+            .plan_fft(cur_count)
+            .process(&mut self.scratch, &mut self.levels[..cur_count]);
+
+        let mut last_path = Path2D::new();
+        let mut highest_path = Path2D::new();
 
         let count = self.last_levels.capacity();
 
         let factor = vec2f(rect.width() / (count - 1) as f32, -rect.height());
 
-        let mut last = vec2f(0., self.update_level(0)?) * factor;
+        let (mut last, mut highest_last) = self
+            .update_level(0, dt)
+            .map(|(last, highest)| (vec2f(0., last) * factor, vec2f(0., highest) * factor))?;
 
-        path.move_to(rect.lower_left() + last);
+        last_path.move_to(rect.lower_left() + last);
+        highest_path.move_to(rect.lower_left() + highest_last);
 
-        let mut cur = vec2f(1., self.update_level(1)?) * factor;
+        let (mut cur, mut highest_cur) = self
+            .update_level(1, dt)
+            .map(|(last, highest)| (vec2f(1., last) * factor, vec2f(1., highest) * factor))?;
+
         let mut last_control = last + (cur - last).normalize() * dist;
+        let mut highest_last_control =
+            highest_last + (highest_cur - highest_last).normalize() * dist;
 
         for i in 2..count {
-            let next = vec2f(i as f32, self.update_level(i)?) * factor;
+            let (next, highest_next) = self.update_level(i, dt).map(|(last, highest)| {
+                (
+                    vec2f(i as f32, last) * factor,
+                    vec2f(i as f32, highest) * factor,
+                )
+            })?;
 
             let offset = (next - last).normalize();
-
-            path.bezier_curve_to(
+            let highest_offset = (highest_next - highest_last).normalize();
+            last_path.bezier_curve_to(
                 rect.lower_left() + last_control,
                 rect.lower_left() + cur - offset * dist,
                 rect.lower_left() + cur,
+            );
+            highest_path.bezier_curve_to(
+                rect.lower_left() + highest_last_control,
+                rect.lower_left() + highest_cur - highest_offset * dist,
+                rect.lower_left() + highest_cur,
             );
 
             last = cur;
             last_control = cur + offset * dist;
             cur = next;
+            highest_last = highest_cur;
+            highest_last_control = highest_cur + highest_offset * dist;
+            highest_cur = highest_next;
         }
 
-        path.bezier_curve_to(
+        last_path.bezier_curve_to(
             rect.lower_left() + last_control,
             rect.lower_left() + cur - (cur - last).normalize() * dist,
             rect.lower_left() + cur,
         );
+        highest_path.bezier_curve_to(
+            rect.lower_left() + highest_last_control,
+            rect.lower_left() + highest_cur - (highest_cur - highest_last).normalize() * dist,
+            rect.lower_left() + highest_cur,
+        );
 
-        Some(path)
+        Some((last_path, highest_path))
     }
 }
 
@@ -159,31 +215,41 @@ fn main() {
         rodio::decoder::Decoder::new_looped(fs::File::open(filename).expect("Could not open file"))
             .expect("Could not read file");
 
-    struct SendSource<Src, Smp> {
-        sender: mpsc::Sender<Smp>,
+    struct SendSource<Src> {
+        sender: mpsc::Sender<f32>,
         inner: Src,
+        accumulator: Vec<f32>,
     }
 
-    impl<Src> Iterator for SendSource<Src, Src::Item>
+    impl<Src> Iterator for SendSource<Src>
     where
-        Src: rodio::Source,
-        Src::Item: rodio::Sample + Copy,
+        Src: rodio::Source<Item = f32>,
     {
         type Item = Src::Item;
 
         fn next(&mut self) -> Option<Src::Item> {
             let inner_next = self.inner.next()?;
 
-            self.sender.send(inner_next).expect("Failure");
+            self.accumulator.push(inner_next);
+
+            let channels = self.inner.channels() as usize;
+
+            if self.accumulator.len() >= channels {
+                // self.sender
+                //     .send(self.accumulator.drain(..).take(channels).sum::<f32>() / channels as f32)
+                //     .expect("Failure");
+                self.sender
+                    .send(self.accumulator.drain(..).next().unwrap())
+                    .expect("Failure");
+            }
 
             Some(inner_next)
         }
     }
 
-    impl<Src> rodio::Source for SendSource<Src, Src::Item>
+    impl<Src> rodio::Source for SendSource<Src>
     where
-        Src: rodio::Source,
-        Src::Item: rodio::Sample + Copy,
+        Src: rodio::Source<Item = f32>,
     {
         fn current_frame_len(&self) -> Option<usize> {
             self.inner.current_frame_len()
@@ -202,19 +268,26 @@ fn main() {
         }
     }
 
-    impl<Src> SendSource<Src, Src::Item>
+    impl<Src> SendSource<Src>
     where
-        Src: rodio::Source,
-        Src::Item: rodio::Sample,
+        Src: rodio::Source<Item = f32>,
     {
         fn new(inner: Src) -> (Self, mpsc::Receiver<Src::Item>) {
             let (sender, recv) = mpsc::channel();
 
-            (Self { inner, sender }, recv)
+            let channels = inner.channels() as usize;
+            (
+                Self {
+                    inner,
+                    sender,
+                    accumulator: Vec::with_capacity(channels),
+                },
+                recv,
+            )
         }
     }
 
-    let (source, recv) = SendSource::<_, f32>::new(decoder.convert_samples());
+    let (source, recv) = SendSource::new(decoder.convert_samples());
 
     let (_stream, handle) = rodio::OutputStream::try_default().expect("Couldn't get audio device");
 
@@ -265,7 +338,7 @@ fn main() {
         vec2f(size.width as f32, size.height as f32),
     ));
 
-    let mut eq = Eq::new(20);
+    let mut eq = Eq::new(50, 44100 / 8);
 
     // Render the canvas to screen.
     let mut scene = SceneProxy::from_scene(scene, renderer.mode().level, RayonExecutor);
@@ -275,8 +348,9 @@ fn main() {
     gl_context.swap_buffers().unwrap();
     let now = time::Instant::now();
 
-    let num_frames = 100;
+    let num_frames = 1000;
     let mut times = Vec::with_capacity(num_frames);
+    let mut dt: f32 = 0.;
     times.push(now - last);
 
     last = now;
@@ -286,7 +360,7 @@ fn main() {
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Poll;
 
-        while let Some(val) = dbg!(recv.recv()).ok() {
+        while let Some(val) = recv.try_recv().ok() {
             eq.push(val);
         }
 
@@ -294,7 +368,7 @@ fn main() {
         let size = vec2f(size.width as f32, size.height as f32);
 
         if times.len() >= num_frames {
-            let avg = times.drain(..).sum::<time::Duration>() / num_frames as u32;
+            let avg = times.drain(..).take(num_frames).sum::<time::Duration>() / num_frames as u32;
 
             println!(
                 "{:?} fps",
@@ -338,21 +412,29 @@ fn main() {
                 let mut context = Canvas::new(size)
                     .get_context_2d(pathfinder_canvas::CanvasFontContext::from_system_source());
 
-                context.set_stroke_style(rgbau(255, 0, 0, 255));
-                context.set_line_width(3.0);
-                context.stroke_path(eq.draw(RectF::new(vec2f(0., 0.), size)).unwrap());
+                if let Some((last_path, highest_path)) =
+                    eq.draw(RectF::new(vec2f(0., 0.), size), dt)
+                {
+                    context.set_line_width(3.0);
 
-                let canvas = context.into_canvas();
-                scene.replace_scene(canvas.into_scene());
-                scene.set_view_box(RectF::new(Vector2F::zero(), size));
-                scene.build_and_render(&mut renderer, build_options.clone());
-                gl_context.swap_buffers().unwrap();
+                    context.set_stroke_style(rgbau(255, 255, 255, 255));
+                    context.stroke_path(last_path);
+
+                    context.set_stroke_style(rgbau(255, 0, 0, 255));
+                    context.stroke_path(highest_path);
+
+                    let canvas = context.into_canvas();
+                    scene.replace_scene(canvas.into_scene());
+                    scene.set_view_box(RectF::new(Vector2F::zero(), size));
+                    scene.build_and_render(&mut renderer, build_options.clone());
+                    gl_context.swap_buffers().unwrap();
+                }
+
                 let now = time::Instant::now();
-                times.push(now - last);
+                let this_dt = now - last;
+                dt = this_dt.as_secs_f32();
+                times.push(this_dt);
                 last = now;
-
-                *control_flow =
-                    ControlFlow::WaitUntil(now + time::Duration::from_secs_f64(1. / 60.));
             }
         }
     });
