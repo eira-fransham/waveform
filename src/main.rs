@@ -1,3 +1,4 @@
+use clap::{App, Arg};
 use glutin::dpi::LogicalSize;
 use glutin::event::{Event, KeyboardInput, VirtualKeyCode, WindowEvent};
 use glutin::event_loop::{ControlFlow, EventLoop};
@@ -212,11 +213,47 @@ fn main() {
 
     const WIDTH: usize = 800;
     const HEIGHT: usize = 600;
+    const FFT_BUFSIZE: usize = 44100 / 8;
+    const EQ_NODES: usize = 200;
 
-    let filename = env::args()
-        .skip(1)
-        .next()
-        .expect("Please pass a sound file to play");
+    let fft_buf_size = FFT_BUFSIZE.to_string();
+    let eq_nodes = EQ_NODES.to_string();
+
+    let matches = App::new("Equaliser")
+        .arg(
+            Arg::with_name("fft_buf_size")
+                .short("f")
+                .long("fft-size")
+                .help("Sets the size of the FFT buffer")
+                .default_value(&fft_buf_size)
+                .takes_value(true),
+        )
+        .arg(
+            Arg::with_name("eq_nodes")
+                .short("e")
+                .long("eq-nodes")
+                .help("Sets the number of nodes on the equalizer")
+                .default_value(&eq_nodes)
+                .takes_value(true),
+        )
+        .arg(
+            Arg::with_name("INPUT")
+                .help("Sets the audio file to play")
+                .required(true)
+                .index(1),
+        )
+        .get_matches();
+    let filename = std::path::Path::new(matches.value_of_os("INPUT").unwrap());
+    let fft_buf_size: usize = matches
+        .value_of("fft_buf_size")
+        .unwrap()
+        .parse()
+        .expect("`fft-size`: not a number");
+    let eq_nodes: usize = matches
+        .value_of("eq_nodes")
+        .unwrap()
+        .parse()
+        .expect("`eq_nodes`: not a number");
 
     let decoder =
         rodio::decoder::Decoder::new_looped(fs::File::open(filename).expect("Could not open file"))
@@ -242,11 +279,8 @@ fn main() {
             let channels = self.inner.channels() as usize;
 
             if self.accumulator.len() >= channels {
-                // self.sender
-                //     .send(self.accumulator.drain(..).take(channels).sum::<f32>() / channels as f32)
-                //     .expect("Failure");
                 self.sender
-                    .send(self.accumulator.drain(..).next().unwrap())
+                    .send(self.accumulator.drain(..).take(channels).sum::<f32>() / channels as f32)
                     .expect("Failure");
             }
 
@@ -347,7 +381,7 @@ fn main() {
         vec2f(size.width as f32, size.height as f32),
     ));
 
-    let mut eq = Eq::new(200, 44100 / 8);
+    let mut eq = Eq::new(eq_nodes, fft_buf_size);
 
     // Render the canvas to screen.
     let mut scene = SceneProxy::from_scene(scene, renderer.mode().level, RayonExecutor);
@@ -426,11 +460,11 @@ fn main() {
                 {
                     context.set_line_width(3.0);
 
-                    context.set_stroke_style(rgbau(255, 255, 255, 255));
-                    context.stroke_path(last_path);
-
                     context.set_stroke_style(rgbau(255, 0, 0, 255));
                     context.stroke_path(highest_path);
+
+                    context.set_stroke_style(rgbau(255, 255, 255, 255));
+                    context.stroke_path(last_path);
 
                     let canvas = context.into_canvas();
                     scene.replace_scene(canvas.into_scene());

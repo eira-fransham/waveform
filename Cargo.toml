@@ -12,6 +12,7 @@ glutin = "0.25"
 rustfft = "4.0"
 rand = "0.7"
 rodio = "0.12"
+clap = "2.33"
 pathfinder_geometry = { git = "https://github.com/servo/pathfinder.git" }
 pathfinder_gl = { git = "https://github.com/servo/pathfinder.git" }
 pathfinder_renderer = { git = "https://github.com/servo/pathfinder.git" }
