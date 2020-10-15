@@ -309,7 +309,7 @@ fn main() {
 
     // Create an OpenGL 3.x context for Pathfinder to use.
     let gl_context = ContextBuilder::new()
-        .with_gl(GlRequest::Specific(Api::OpenGlEs, (3, 1)))
+        .with_gl(GlRequest::Latest)
         .with_gl_profile(GlProfile::Core)
         .build_windowed(window_builder, &event_loop)
         .unwrap();
