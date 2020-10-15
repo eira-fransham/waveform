@@ -1,6 +1,8 @@
 use glutin::dpi::LogicalSize;
 use glutin::event::{Event, KeyboardInput, VirtualKeyCode, WindowEvent};
 use glutin::event_loop::{ControlFlow, EventLoop};
+#[cfg(windows)]
+use glutin::platform::windows::WindowBuilderExtWindows;
 use glutin::window::WindowBuilder;
 use glutin::{Api, ContextBuilder, GlProfile, GlRequest};
 use pathfinder_canvas::{
@@ -306,6 +308,8 @@ fn main() {
     let window_builder = WindowBuilder::new()
         .with_title("Minimal example")
         .with_inner_size(logical_window_size);
+    #[cfg(windows)]
+    let window_builder = window_builder.with_drag_and_drop(false);
 
     // Create an OpenGL 3.x context for Pathfinder to use.
     let gl_context = ContextBuilder::new()
