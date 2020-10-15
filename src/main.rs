@@ -82,7 +82,7 @@ impl Eq {
         let prop = actual_index - lower as f32;
         let level =
             self.levels.get(lower)?.norm() * prop + self.levels.get(higher)?.norm() * (1. - prop);
-        let level = level.abs().log10().powi(4).max(0.).min(100.) / 100.;
+        let level = (level.abs() + 1.).log10().powi(4).max(0.).min(100.) / 100.;
         let last = match self.last_levels.get_mut(i) {
             Some(last) => {
                 let out = *last * (1. - frac) + level * frac;
