@@ -76,12 +76,17 @@ impl Eq {
         let frac = (FRACTION * dt).min(1.);
         let highest_frac = (HIGHEST_FRACTION * dt).min(1.);
 
-        let actual_index =
-            ((i as f32) / self.len() as f32).powi(2) * (self.levels.len() as f32 / 2.);
-        let (lower, higher) = (actual_index.floor() as usize, actual_index.ceil() as usize);
-        let prop = actual_index - lower as f32;
-        let level =
-            self.levels.get(lower)?.norm() * prop + self.levels.get(higher)?.norm() * (1. - prop);
+        let calc_index = |i: f32| (i / self.len() as f32).powi(2) * (self.levels.len() as f32 / 2.);
+
+        let (lower, higher) = (
+            calc_index(i as f32 - 0.5).floor() as usize,
+            calc_index(i as f32 + 0.5).ceil() as usize,
+        );
+        let higher = higher.max(lower + 1);
+        let level = self.levels[lower.max(0)..higher.min(self.levels.len())]
+            .iter()
+            .map(|c| c.norm())
+            .sum::<f32>();
         let level = (level.abs() + 1.).log10().powi(4).max(0.).min(100.) / 100.;
         let last = match self.last_levels.get_mut(i) {
             Some(last) => {
@@ -338,7 +343,7 @@ fn main() {
         vec2f(size.width as f32, size.height as f32),
     ));
 
-    let mut eq = Eq::new(50, 44100 / 8);
+    let mut eq = Eq::new(200, 44100 / 8);
 
     // Render the canvas to screen.
     let mut scene = SceneProxy::from_scene(scene, renderer.mode().level, RayonExecutor);
