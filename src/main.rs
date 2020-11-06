@@ -16,7 +16,9 @@ use pathfinder_geometry::vector::{vec2f, vec2i, Vector2F};
 use pathfinder_gl::{GLDevice, GLVersion};
 use pathfinder_renderer::concurrent::rayon::RayonExecutor;
 use pathfinder_renderer::concurrent::scene_proxy::SceneProxy;
-use pathfinder_renderer::gpu::options::{DestFramebuffer, RendererMode, RendererOptions};
+use pathfinder_renderer::gpu::options::{
+    DestFramebuffer, RendererLevel, RendererMode, RendererOptions,
+};
 use pathfinder_renderer::gpu::renderer::Renderer;
 use pathfinder_renderer::options::{BuildOptions, RenderTransform};
 use pathfinder_renderer::scene::Scene;
@@ -237,6 +239,18 @@ fn main() {
                 .takes_value(true),
         )
         .arg(
+            Arg::with_name("gpu")
+                .long("gpu")
+                .conflicts_with("cpu")
+                .help("Force GPU mode"),
+        )
+        .arg(
+            Arg::with_name("cpu")
+                .long("cpu")
+                .conflicts_with("gpu")
+                .help("Force CPU mode"),
+        )
+        .arg(
             Arg::with_name("INPUT")
                 .help("Sets the audio file to play")
                 .required(true)
@@ -254,6 +268,12 @@ fn main() {
         .unwrap()
         .parse()
         .expect("`eq_nodes`: not a number");
+    let gpu: Option<bool> = match (matches.is_present("gpu"), matches.is_present("cpu")) {
+        (true, false) => Some(true),
+        (false, true) => Some(false),
+        (false, false) => None,
+        (true, true) => unreachable!(),
+    };
 
     let decoder =
         rodio::decoder::Decoder::new_looped(fs::File::open(filename).expect("Could not open file"))
@@ -347,8 +367,11 @@ fn main() {
 
     // Create an OpenGL 3.x context for Pathfinder to use.
     let gl_context = ContextBuilder::new()
-        .with_gl(GlRequest::Latest)
-        .with_gl_profile(GlProfile::Core)
+        .with_gl(GlRequest::GlThenGles {
+            opengl_version: (4, 0),
+            opengles_version: (3, 0),
+        })
+        .with_gl_profile(GlProfile::Compatibility)
         .build_windowed(window_builder, &event_loop)
         .unwrap();
 
@@ -361,7 +384,10 @@ fn main() {
     let physical_size = gl_context.window().inner_size();
 
     // Create a Pathfinder renderer.
-    let device = GLDevice::new(GLVersion::GLES3, 0);
+    let device = match gl_context.get_api() {
+        Api::OpenGl => GLDevice::new(GLVersion::GL4, 0),
+        Api::OpenGlEs | Api::WebGl => GLDevice::new(GLVersion::GLES3, 0),
+    };
     let options = RendererOptions {
         background_color: Some(ColorF::new(0., 0., 0., 1.)),
         dest: DestFramebuffer::full_window(vec2i(
@@ -371,7 +397,16 @@ fn main() {
         show_debug_ui: false,
     };
     let resources = EmbeddedResourceLoader;
-    let mode = RendererMode::default_for_device(&device);
+    let mode = match gpu {
+        Some(gpu) => RendererMode {
+            level: if gpu {
+                RendererLevel::D3D11
+            } else {
+                RendererLevel::D3D9
+            },
+        },
+        None => RendererMode::default_for_device(&device),
+    };
     let mut renderer = Renderer::new(device, &resources, mode, options);
 
     // Clear to swf stage background color.
