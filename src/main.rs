@@ -566,12 +566,12 @@ fn main() {
 
                     paint.set_stroke_width(3.0);
                     paint.set_style(PaintStyle::Stroke);
-                    paint.set_color(0xff_ff_00_00);
+                    paint.set_anti_alias(true);
 
+                    paint.set_color(0xff_ff_00_00);
                     canvas.draw_path(&highest_path, &paint);
 
                     paint.set_color(0xff_ff_ff_ff);
-
                     canvas.draw_path(&last_path, &paint);
                 }
 
