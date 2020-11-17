@@ -13,10 +13,4 @@ rustfft = "4.0"
 rand = "0.7"
 rodio = "0.12"
 clap = "2.33"
-pathfinder_geometry = { git = "https://github.com/servo/pathfinder.git" }
-pathfinder_gl = { git = "https://github.com/servo/pathfinder.git" }
-pathfinder_renderer = { git = "https://github.com/servo/pathfinder.git" }
-pathfinder_resources = { git = "https://github.com/servo/pathfinder.git" }
-pathfinder_color = { git = "https://github.com/servo/pathfinder.git" }
-pathfinder_content = { git = "https://github.com/servo/pathfinder.git" }
-pathfinder_canvas = { git = "https://github.com/servo/pathfinder.git" }
+skia-safe = { git = "https://github.com/rust-skia/rust-skia.git", features = ["gl"] }

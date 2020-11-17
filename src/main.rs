@@ -1,39 +1,23 @@
 use clap::{App, Arg};
 use glutin::dpi::LogicalSize;
-use glutin::event::{Event, KeyboardInput, VirtualKeyCode, WindowEvent};
-use glutin::event_loop::{ControlFlow, EventLoop};
 #[cfg(windows)]
 use glutin::platform::windows::WindowBuilderExtWindows;
-use glutin::window::WindowBuilder;
-use glutin::{Api, ContextBuilder, GlProfile, GlRequest};
-use pathfinder_canvas::{
-    Canvas, CanvasFontContext, CanvasRenderingContext2D, LineJoin, Path2D, Transform2F,
+use glutin::{
+    event::{Event, KeyboardInput, VirtualKeyCode, WindowEvent},
+    event_loop::{ControlFlow, EventLoop},
+    window::WindowBuilder,
+    ContextBuilder, GlProfile, GlRequest,
 };
-use pathfinder_canvas::{TextAlign, TextBaseline};
-use pathfinder_color::{rgbau, rgbf, rgbu, ColorF, ColorU};
-use pathfinder_geometry::rect::RectF;
-use pathfinder_geometry::vector::{vec2f, vec2i, Vector2F};
-use pathfinder_gl::{GLDevice, GLVersion};
-use pathfinder_renderer::concurrent::rayon::RayonExecutor;
-use pathfinder_renderer::concurrent::scene_proxy::SceneProxy;
-use pathfinder_renderer::gpu::options::{
-    DestFramebuffer, RendererLevel, RendererMode, RendererOptions,
-};
-use pathfinder_renderer::gpu::renderer::Renderer;
-use pathfinder_renderer::options::{BuildOptions, RenderTransform};
-use pathfinder_renderer::scene::Scene;
-use pathfinder_resources::embedded::EmbeddedResourceLoader;
-
-use rustfft::num_complex::Complex32;
-use rustfft::{FFTplanner, FFT};
-
 use rodio::Source as _;
+use rustfft::{num_complex::Complex32, FFTplanner};
+use skia_safe::{
+    gpu::{gl::FramebufferInfo, BackendRenderTarget, SurfaceOrigin},
+    Color, ColorType, Paint, PaintStyle, Path, Surface,
+};
 
-use std::collections::VecDeque;
-use std::env;
-use std::fs;
-use std::sync::mpsc;
-use std::time;
+use std::{collections::VecDeque, convert::TryInto, fs, ops, sync::mpsc, time};
+
+type WindowedContext = glutin::ContextWrapper<glutin::PossiblyCurrent, glutin::window::Window>;
 
 struct Eq {
     fft_planner: FFTplanner<f32>,
@@ -44,6 +28,120 @@ struct Eq {
     next: VecDeque<Complex32>,
     buf_len: usize,
     len: usize,
+}
+
+#[derive(Copy, Clone, PartialEq, Debug)]
+struct V2(pub f32, pub f32);
+
+impl V2 {
+    fn tup(self) -> (f32, f32) {
+        (self.0, self.1)
+    }
+
+    fn len2(self) -> f32 {
+        self.0 * self.0 + self.1 * self.1
+    }
+
+    fn len(self) -> f32 {
+        self.len2().sqrt()
+    }
+
+    fn normalize(self) -> Self {
+        self / self.len()
+    }
+}
+
+impl From<(f32, f32)> for V2 {
+    fn from((x, y): (f32, f32)) -> Self {
+        Self(x, y)
+    }
+}
+
+impl From<V2> for skia_safe::Point {
+    fn from(other: V2) -> Self {
+        other.tup().into()
+    }
+}
+
+impl ops::Add for V2 {
+    type Output = Self;
+
+    fn add(self, other: Self) -> Self {
+        V2(self.0 + other.0, self.1 + other.1)
+    }
+}
+
+impl ops::Sub for V2 {
+    type Output = Self;
+
+    fn sub(self, other: Self) -> Self {
+        V2(self.0 - other.0, self.1 - other.1)
+    }
+}
+
+impl ops::Mul for V2 {
+    type Output = Self;
+
+    fn mul(self, other: Self) -> Self {
+        V2(self.0 * other.0, self.1 * other.1)
+    }
+}
+
+impl ops::Mul<f32> for V2 {
+    type Output = Self;
+
+    fn mul(self, other: f32) -> Self {
+        V2(self.0 * other, self.1 * other)
+    }
+}
+
+impl ops::Mul<V2> for f32 {
+    type Output = V2;
+
+    fn mul(self, other: V2) -> V2 {
+        other.mul(self)
+    }
+}
+
+impl ops::Div for V2 {
+    type Output = Self;
+
+    fn div(self, other: Self) -> Self {
+        V2(self.0 / other.0, self.1 / other.1)
+    }
+}
+
+impl ops::Div<f32> for V2 {
+    type Output = Self;
+
+    fn div(self, other: f32) -> Self {
+        V2(self.0 / other, self.1 / other)
+    }
+}
+
+struct RectF {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
+
+impl RectF {
+    fn new((x, y): (f32, f32), (w, h): (f32, f32)) -> Self {
+        RectF { x, y, w, h }
+    }
+
+    fn width(&self) -> f32 {
+        self.w
+    }
+
+    fn height(&self) -> f32 {
+        self.h
+    }
+
+    fn lower_left(&self) -> V2 {
+        V2(self.x, self.y + self.h)
+    }
 }
 
 impl Eq {
@@ -130,7 +228,7 @@ impl Eq {
         Some((last, highest))
     }
 
-    fn draw(&mut self, rect: RectF, dt: f32) -> Option<(Path2D, Path2D)> {
+    fn draw(&mut self, rect: RectF, dt: f32) -> Option<(Path, Path)> {
         const CURVE_CONTROL_DIST: f32 = 1000.0;
 
         let dist = CURVE_CONTROL_DIST / self.len() as f32;
@@ -144,23 +242,23 @@ impl Eq {
             .plan_fft(cur_count)
             .process(&mut self.scratch, &mut self.levels[..cur_count]);
 
-        let mut last_path = Path2D::new();
-        let mut highest_path = Path2D::new();
+        let mut last_path = Path::new();
+        let mut highest_path = Path::new();
 
         let count = self.last_levels.capacity();
 
-        let factor = vec2f(rect.width() / (count - 1) as f32, -rect.height());
+        let factor = V2(rect.width() / (count - 1) as f32, -rect.height());
 
         let (mut last, mut highest_last) = self
             .update_level(0, dt)
-            .map(|(last, highest)| (vec2f(0., last) * factor, vec2f(0., highest) * factor))?;
+            .map(|(last, highest)| (V2(0., last) * factor, V2(0., highest) * factor))?;
 
         last_path.move_to(rect.lower_left() + last);
         highest_path.move_to(rect.lower_left() + highest_last);
 
         let (mut cur, mut highest_cur) = self
             .update_level(1, dt)
-            .map(|(last, highest)| (vec2f(1., last) * factor, vec2f(1., highest) * factor))?;
+            .map(|(last, highest)| (V2(1., last) * factor, V2(1., highest) * factor))?;
 
         let mut last_control = last + (cur - last).normalize() * dist;
         let mut highest_last_control =
@@ -168,20 +266,17 @@ impl Eq {
 
         for i in 2..count {
             let (next, highest_next) = self.update_level(i, dt).map(|(last, highest)| {
-                (
-                    vec2f(i as f32, last) * factor,
-                    vec2f(i as f32, highest) * factor,
-                )
+                (V2(i as f32, last) * factor, V2(i as f32, highest) * factor)
             })?;
 
             let offset = (next - last).normalize();
             let highest_offset = (highest_next - highest_last).normalize();
-            last_path.bezier_curve_to(
+            last_path.cubic_to(
                 rect.lower_left() + last_control,
                 rect.lower_left() + cur - offset * dist,
                 rect.lower_left() + cur,
             );
-            highest_path.bezier_curve_to(
+            highest_path.cubic_to(
                 rect.lower_left() + highest_last_control,
                 rect.lower_left() + highest_cur - highest_offset * dist,
                 rect.lower_left() + highest_cur,
@@ -195,12 +290,12 @@ impl Eq {
             highest_cur = highest_next;
         }
 
-        last_path.bezier_curve_to(
+        last_path.cubic_to(
             rect.lower_left() + last_control,
-            rect.lower_left() + cur - (cur - last).normalize() * dist,
+            rect.lower_left() + cur - last.normalize() * dist,
             rect.lower_left() + cur,
         );
-        highest_path.bezier_curve_to(
+        highest_path.cubic_to(
             rect.lower_left() + highest_last_control,
             rect.lower_left() + highest_cur - (highest_cur - highest_last).normalize() * dist,
             rect.lower_left() + highest_cur,
@@ -211,8 +306,6 @@ impl Eq {
 }
 
 fn main() {
-    use rand::Rng;
-
     const WIDTH: usize = 800;
     const HEIGHT: usize = 600;
     const FFT_BUFSIZE: usize = 44100 / 8;
@@ -239,18 +332,6 @@ fn main() {
                 .takes_value(true),
         )
         .arg(
-            Arg::with_name("gpu")
-                .long("gpu")
-                .conflicts_with("cpu")
-                .help("Force GPU mode"),
-        )
-        .arg(
-            Arg::with_name("cpu")
-                .long("cpu")
-                .conflicts_with("gpu")
-                .help("Force CPU mode"),
-        )
-        .arg(
             Arg::with_name("INPUT")
                 .help("Sets the audio file to play")
                 .required(true)
@@ -268,12 +349,6 @@ fn main() {
         .unwrap()
         .parse()
         .expect("`eq_nodes`: not a number");
-    let gpu: Option<bool> = match (matches.is_present("gpu"), matches.is_present("cpu")) {
-        (true, false) => Some(true),
-        (false, true) => Some(false),
-        (false, false) => None,
-        (true, true) => unreachable!(),
-    };
 
     let decoder =
         rodio::decoder::Decoder::new_looped(fs::File::open(filename).expect("Could not open file"))
@@ -367,63 +442,65 @@ fn main() {
 
     // Create an OpenGL 3.x context for Pathfinder to use.
     let gl_context = ContextBuilder::new()
-        .with_gl(GlRequest::GlThenGles {
-            opengl_version: (4, 0),
-            opengles_version: (3, 0),
-        })
-        .with_gl_profile(GlProfile::Compatibility)
+        .with_depth_buffer(0)
+        .with_stencil_buffer(8)
+        .with_pixel_format(24, 8)
+        .with_double_buffer(Some(true))
         .build_windowed(window_builder, &event_loop)
         .unwrap();
 
-    let size = gl_context.window().inner_size();
-
     // Load OpenGL, and make the context current.
     let gl_context = unsafe { gl_context.make_current().unwrap() };
-    gl::load_with(|name| gl_context.get_proc_address(name) as *const _);
 
-    let physical_size = gl_context.window().inner_size();
+    gl::load_with(|name| gl_context.get_proc_address(name));
 
-    // Create a Pathfinder renderer.
-    let device = match gl_context.get_api() {
-        Api::OpenGl => GLDevice::new(GLVersion::GL4, 0),
-        Api::OpenGlEs | Api::WebGl => GLDevice::new(GLVersion::GLES3, 0),
-    };
-    let options = RendererOptions {
-        background_color: Some(ColorF::new(0., 0., 0., 1.)),
-        dest: DestFramebuffer::full_window(vec2i(
-            physical_size.width as i32,
-            physical_size.height as i32,
-        )),
-        show_debug_ui: false,
-    };
-    let resources = EmbeddedResourceLoader;
-    let mode = match gpu {
-        Some(gpu) => RendererMode {
-            level: if gpu {
-                RendererLevel::D3D11
-            } else {
-                RendererLevel::D3D9
-            },
-        },
-        None => RendererMode::default_for_device(&device),
-    };
-    let mut renderer = Renderer::new(device, &resources, mode, options);
+    let mut gr_context = skia_safe::gpu::Context::new_gl(None).unwrap();
 
-    // Clear to swf stage background color.
-    let mut scene = Scene::new();
-    scene.set_view_box(RectF::new(
-        Vector2F::zero(),
-        vec2f(size.width as f32, size.height as f32),
-    ));
+    let fb_info = {
+        let mut fboid: gl::types::GLint = 0;
+        unsafe { gl::GetIntegerv(gl::FRAMEBUFFER_BINDING, &mut fboid) };
+
+        FramebufferInfo {
+            fboid: fboid.try_into().unwrap(),
+            format: skia_safe::gpu::gl::Format::RGBA8.into(),
+        }
+    };
+
+    fn create_surface(
+        windowed_context: &WindowedContext,
+        fb_info: &FramebufferInfo,
+        gr_context: &mut skia_safe::gpu::Context,
+    ) -> skia_safe::Surface {
+        let pixel_format = windowed_context.get_pixel_format();
+        let size = windowed_context.window().inner_size();
+        let backend_render_target = BackendRenderTarget::new_gl(
+            (
+                size.width.try_into().unwrap(),
+                size.height.try_into().unwrap(),
+            ),
+            pixel_format.multisampling.map(|s| s.try_into().unwrap()),
+            pixel_format.stencil_bits.try_into().unwrap(),
+            *fb_info,
+        );
+        Surface::from_backend_render_target(
+            gr_context,
+            &backend_render_target,
+            SurfaceOrigin::BottomLeft,
+            ColorType::RGBA8888,
+            None,
+            None,
+        )
+        .unwrap()
+    };
+
+    let mut surface = create_surface(&gl_context, &fb_info, &mut gr_context);
+    let sf = gl_context.window().scale_factor() as f32;
+    surface.canvas().scale((sf, sf));
 
     let mut eq = Eq::new(eq_nodes, fft_buf_size);
 
-    // Render the canvas to screen.
-    let mut scene = SceneProxy::from_scene(scene, renderer.mode().level, RayonExecutor);
-    let build_options = BuildOptions::default();
     let mut last = time::Instant::now();
-    scene.build_and_render(&mut renderer, build_options.clone());
-    gl_context.swap_buffers().unwrap();
+
     let now = time::Instant::now();
 
     let num_frames = 1000;
@@ -443,7 +520,7 @@ fn main() {
         }
 
         let size = gl_context.window().inner_size();
-        let size = vec2f(size.width as f32, size.height as f32);
+        let size = (size.width as f32, size.height as f32);
 
         if times.len() >= num_frames {
             let avg = times.drain(..).take(num_frames).sum::<time::Duration>() / num_frames as u32;
@@ -478,35 +555,28 @@ fn main() {
                 ..
             } => {
                 gl_context.resize(physical_size);
-                renderer.options_mut().dest = DestFramebuffer::full_window(vec2i(
-                    physical_size.width as i32,
-                    physical_size.height as i32,
-                ));
-                renderer.dest_framebuffer_size_changed();
+                surface = create_surface(&gl_context, &fb_info, &mut gr_context);
             }
             _ => {
-                scene.set_view_box(RectF::new(Vector2F::zero(), size));
+                if let Some((last_path, highest_path)) = eq.draw(RectF::new((0., 0.), size), dt) {
+                    let mut paint = Paint::default();
 
-                let mut context = Canvas::new(size)
-                    .get_context_2d(pathfinder_canvas::CanvasFontContext::from_system_source());
+                    let canvas = surface.canvas();
+                    canvas.clear(Color::BLACK);
 
-                if let Some((last_path, highest_path)) =
-                    eq.draw(RectF::new(vec2f(0., 0.), size), dt)
-                {
-                    context.set_line_width(3.0);
+                    paint.set_stroke_width(3.0);
+                    paint.set_style(PaintStyle::Stroke);
+                    paint.set_color(0xff_ff_00_00);
 
-                    context.set_stroke_style(rgbau(255, 0, 0, 255));
-                    context.stroke_path(highest_path);
+                    canvas.draw_path(&highest_path, &paint);
 
-                    context.set_stroke_style(rgbau(255, 255, 255, 255));
-                    context.stroke_path(last_path);
+                    paint.set_color(0xff_ff_ff_ff);
 
-                    let canvas = context.into_canvas();
-                    scene.replace_scene(canvas.into_scene());
-                    scene.set_view_box(RectF::new(Vector2F::zero(), size));
-                    scene.build_and_render(&mut renderer, build_options.clone());
-                    gl_context.swap_buffers().unwrap();
+                    canvas.draw_path(&last_path, &paint);
                 }
+
+                surface.canvas().flush();
+                gl_context.swap_buffers().unwrap();
 
                 let now = time::Instant::now();
                 let this_dt = now - last;
