@@ -14,3 +14,6 @@ rand = "0.7"
 rodio = "0.12"
 clap = "2.33"
 skia-safe = { git = "https://github.com/Vurich/rust-skia.git", features = ["gl", "wayland"] }
+
+[profile.release]
+lto = "thin"

@@ -6,7 +6,7 @@ use glutin::{
     event::{Event, KeyboardInput, VirtualKeyCode, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
     window::WindowBuilder,
-    ContextBuilder, GlProfile, GlRequest,
+    ContextBuilder, GlRequest,
 };
 use rodio::Source as _;
 use rustfft::{num_complex::Complex32, FFTplanner};
@@ -485,7 +485,7 @@ fn main() {
 
     gl::load_with(|name| gl_context.get_proc_address(name));
 
-    let mut gr_context = skia_safe::gpu::Context::new_gl(None).unwrap();
+    let mut gr_context = skia_safe::gpu::Context::new_gl(None, None).unwrap();
 
     let fb_info = {
         let mut fboid: gl::types::GLint = 0;
