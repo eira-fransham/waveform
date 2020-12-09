@@ -554,8 +554,10 @@ fn main() {
 
     let (stream_and_handle, player);
     let mut recv = if let Some((source, recv)) = indirect_source {
-        stream_and_handle = rodio::OutputStream::try_default().expect("Couldn't get audio device");
-        player = rodio::Sink::try_new(&stream_and_handle.1).expect("Couldn't get audio device");
+        stream_and_handle = rodio::OutputStream::try_default()
+            .expect("Couldn't get audio device (try passing `--player dummy`)");
+        player = rodio::Sink::try_new(&stream_and_handle.1)
+            .expect("Couldn't get audio device (try passing `--player dummy`)");
 
         player.append(source);
 
