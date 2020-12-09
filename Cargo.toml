@@ -8,9 +8,9 @@ edition = "2018"
 
 [dependencies]
 gl = "0.14"
-glutin = "0.25"
+glutin = { version = "0.25", features = ["wayland"], default_features = false }
 rustfft = "4.0"
 rand = "0.7"
 rodio = "0.12"
 clap = "2.33"
-skia-safe = { git = "https://github.com/rust-skia/rust-skia.git", features = ["gl"] }
+skia-safe = { path = "../rust-skia/skia-safe/", features = ["gl"], default_features = false }

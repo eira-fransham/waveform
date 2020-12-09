@@ -25,6 +25,8 @@ struct Eq {
     levels: Vec<Complex32>,
     last_levels: Vec<f32>,
     highest_levels: Vec<f32>,
+    last_path: Path,
+    highest_path: Path,
     next: VecDeque<Complex32>,
     buf_len: usize,
     len: usize,
@@ -152,6 +154,8 @@ impl Eq {
             levels: vec![Default::default(); buffer_size],
             last_levels: Vec::with_capacity(num_levels),
             highest_levels: Vec::with_capacity(num_levels),
+            last_path: Path::new(),
+            highest_path: Path::new(),
             next: VecDeque::with_capacity(buffer_size),
             buf_len: buffer_size,
             len: num_levels,
@@ -228,7 +232,7 @@ impl Eq {
         Some((last, highest))
     }
 
-    fn draw(&mut self, rect: RectF, dt: f32) -> Option<(Path, Path)> {
+    fn draw(&mut self, rect: RectF, dt: f32) -> Option<(&Path, &Path)> {
         const CURVE_CONTROL_DIST: f32 = 1000.0;
 
         let dist = CURVE_CONTROL_DIST / self.len() as f32;
@@ -242,8 +246,8 @@ impl Eq {
             .plan_fft(cur_count)
             .process(&mut self.scratch, &mut self.levels[..cur_count]);
 
-        let mut last_path = Path::new();
-        let mut highest_path = Path::new();
+        self.last_path.rewind();
+        self.highest_path.rewind();
 
         let count = self.last_levels.capacity();
 
@@ -253,8 +257,8 @@ impl Eq {
             .update_level(0, dt)
             .map(|(last, highest)| (V2(0., last) * factor, V2(0., highest) * factor))?;
 
-        last_path.move_to(rect.lower_left() + last);
-        highest_path.move_to(rect.lower_left() + highest_last);
+        self.last_path.move_to(rect.lower_left() + last);
+        self.highest_path.move_to(rect.lower_left() + highest_last);
 
         let (mut cur, mut highest_cur) = self
             .update_level(1, dt)
@@ -271,12 +275,12 @@ impl Eq {
 
             let offset = (next - last).normalize();
             let highest_offset = (highest_next - highest_last).normalize();
-            last_path.cubic_to(
+            self.last_path.cubic_to(
                 rect.lower_left() + last_control,
                 rect.lower_left() + cur - offset * dist,
                 rect.lower_left() + cur,
             );
-            highest_path.cubic_to(
+            self.highest_path.cubic_to(
                 rect.lower_left() + highest_last_control,
                 rect.lower_left() + highest_cur - highest_offset * dist,
                 rect.lower_left() + highest_cur,
@@ -290,18 +294,18 @@ impl Eq {
             highest_cur = highest_next;
         }
 
-        last_path.cubic_to(
+        self.last_path.cubic_to(
             rect.lower_left() + last_control,
             rect.lower_left() + cur - last.normalize() * dist,
             rect.lower_left() + cur,
         );
-        highest_path.cubic_to(
+        self.highest_path.cubic_to(
             rect.lower_left() + highest_last_control,
             rect.lower_left() + highest_cur - (highest_cur - highest_last).normalize() * dist,
             rect.lower_left() + highest_cur,
         );
 
-        Some((last_path, highest_path))
+        Some((&self.last_path, &self.highest_path))
     }
 }
 
@@ -442,10 +446,6 @@ fn main() {
 
     // Create an OpenGL 3.x context for Pathfinder to use.
     let gl_context = ContextBuilder::new()
-        .with_depth_buffer(0)
-        .with_stencil_buffer(8)
-        .with_pixel_format(24, 8)
-        .with_double_buffer(Some(true))
         .build_windowed(window_builder, &event_loop)
         .unwrap();
 
@@ -512,6 +512,18 @@ fn main() {
 
     player.append(source);
 
+    let mut last_paint = Paint::default();
+    last_paint.set_stroke_width(3.0);
+    last_paint.set_style(PaintStyle::Stroke);
+    last_paint.set_anti_alias(true);
+    last_paint.set_color(0xff_ff_00_00);
+
+    let mut highest_paint = Paint::default();
+    highest_paint.set_stroke_width(3.0);
+    highest_paint.set_style(PaintStyle::Stroke);
+    highest_paint.set_anti_alias(true);
+    highest_paint.set_color(0xff_ff_ff_ff);
+
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Poll;
 
@@ -557,22 +569,13 @@ fn main() {
                 gl_context.resize(physical_size);
                 surface = create_surface(&gl_context, &fb_info, &mut gr_context);
             }
-            _ => {
+            Event::RedrawRequested(_) => {
                 if let Some((last_path, highest_path)) = eq.draw(RectF::new((0., 0.), size), dt) {
-                    let mut paint = Paint::default();
-
                     let canvas = surface.canvas();
                     canvas.clear(Color::BLACK);
 
-                    paint.set_stroke_width(3.0);
-                    paint.set_style(PaintStyle::Stroke);
-                    paint.set_anti_alias(true);
-
-                    paint.set_color(0xff_ff_00_00);
-                    canvas.draw_path(&highest_path, &paint);
-
-                    paint.set_color(0xff_ff_ff_ff);
-                    canvas.draw_path(&last_path, &paint);
+                    canvas.draw_path(&highest_path, &highest_paint);
+                    canvas.draw_path(&last_path, &last_paint);
                 }
 
                 surface.canvas().flush();
@@ -584,6 +587,10 @@ fn main() {
                 times.push(this_dt);
                 last = now;
             }
+            Event::MainEventsCleared => {
+                gl_context.window().request_redraw();
+            }
+            _ => {}
         }
     });
 }
