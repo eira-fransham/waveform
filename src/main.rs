@@ -310,6 +310,8 @@ impl Eq {
 }
 
 fn main() {
+    use clap::{arg_enum, value_t};
+
     const WIDTH: usize = 800;
     const HEIGHT: usize = 600;
     const FFT_BUFSIZE: usize = 44100 / 8;
@@ -317,6 +319,19 @@ fn main() {
 
     let fft_buf_size = FFT_BUFSIZE.to_string();
     let eq_nodes = EQ_NODES.to_string();
+
+    arg_enum! {
+        enum PlayerType {
+            Dummy,
+            Rodio,
+        }
+    }
+
+    impl Default for PlayerType {
+        fn default() -> Self {
+            Self::Rodio
+        }
+    }
 
     let matches = App::new("Equaliser")
         .arg(
@@ -336,6 +351,18 @@ fn main() {
                 .takes_value(true),
         )
         .arg(
+            Arg::with_name("player")
+                .short("p")
+                .long("player")
+                .possible_values(&PlayerType::variants())
+                .case_insensitive(true)
+                .default_value("rodio")
+                .help(
+                    "Either play through the speakers using Rodio (default) or just consume \
+                the audio buffer without playing the sound.",
+                ),
+        )
+        .arg(
             Arg::with_name("INPUT")
                 .help("Sets the audio file to play")
                 .required(true)
@@ -353,11 +380,12 @@ fn main() {
         .unwrap()
         .parse()
         .expect("`eq_nodes`: not a number");
+    let player = value_t!(matches, "player", PlayerType).expect("`player`: invalid input");
 
     let decoder =
         rodio::decoder::Decoder::new_looped(fs::File::open(filename).expect("Could not open file"))
-            .expect("Could not read file");
-
+            .expect("Could not read file")
+            .convert_samples::<f32>();
     struct SendSource<Src> {
         sender: mpsc::Sender<f32>,
         inner: Src,
@@ -427,11 +455,10 @@ fn main() {
         }
     }
 
-    let (source, recv) = SendSource::new(decoder.convert_samples());
-
-    let (_stream, handle) = rodio::OutputStream::try_default().expect("Couldn't get audio device");
-
-    let player = rodio::Sink::try_new(&handle).expect("Couldn't get audio device");
+    let (mut direct_source, indirect_source) = match player {
+        PlayerType::Dummy => (Some(decoder), None),
+        PlayerType::Rodio => (None, Some(SendSource::new(decoder.convert_samples()))),
+    };
 
     // Calculate the right logical size of the window.
     let event_loop = EventLoop::new();
@@ -446,6 +473,10 @@ fn main() {
 
     // Create an OpenGL 3.x context for Pathfinder to use.
     let gl_context = ContextBuilder::new()
+        .with_gl(GlRequest::GlThenGles {
+            opengl_version: (4, 6),
+            opengles_version: (3, 1),
+        })
         .build_windowed(window_builder, &event_loop)
         .unwrap();
 
@@ -510,25 +541,36 @@ fn main() {
 
     last = now;
 
-    player.append(source);
-
     let mut last_paint = Paint::default();
     last_paint.set_stroke_width(3.0);
     last_paint.set_style(PaintStyle::Stroke);
     last_paint.set_anti_alias(true);
     last_paint.set_color(0xff_ff_00_00);
-
     let mut highest_paint = Paint::default();
     highest_paint.set_stroke_width(3.0);
     highest_paint.set_style(PaintStyle::Stroke);
     highest_paint.set_anti_alias(true);
     highest_paint.set_color(0xff_ff_ff_ff);
 
+    let (stream_and_handle, player);
+    let mut recv = if let Some((source, recv)) = indirect_source {
+        stream_and_handle = rodio::OutputStream::try_default().expect("Couldn't get audio device");
+        player = rodio::Sink::try_new(&stream_and_handle.1).expect("Couldn't get audio device");
+
+        player.append(source);
+
+        Some(recv)
+    } else {
+        None
+    };
+
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Poll;
 
-        while let Some(val) = recv.try_recv().ok() {
-            eq.push(val);
+        if let Some(recv) = &mut recv {
+            while let Some(val) = recv.try_recv().ok() {
+                eq.push(val);
+            }
         }
 
         let size = gl_context.window().inner_size();
@@ -570,6 +612,16 @@ fn main() {
                 surface = create_surface(&gl_context, &fb_info, &mut gr_context);
             }
             Event::RedrawRequested(_) => {
+                if let Some(source) = &mut direct_source {
+                    let num_samples = (dt as f64 * source.sample_rate() as f64) as usize;
+                    let channels = source.channels() as _;
+
+                    for _ in 0..num_samples {
+                        let sum: f32 = source.by_ref().take(channels).sum();
+                        eq.push(sum / channels as f32);
+                    }
+                }
+
                 if let Some((last_path, highest_path)) = eq.draw(RectF::new((0., 0.), size), dt) {
                     let canvas = surface.canvas();
                     canvas.clear(Color::BLACK);

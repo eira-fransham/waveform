@@ -13,4 +13,4 @@ rustfft = "4.0"
 rand = "0.7"
 rodio = "0.12"
 clap = "2.33"
-skia-safe = { path = "../rust-skia/skia-safe/", features = ["gl"], default_features = false }
+skia-safe = { git = "https://github.com/Vurich/rust-skia.git", features = ["gl", "wayland"] }
